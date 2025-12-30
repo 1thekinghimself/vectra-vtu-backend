@@ -1,10 +1,9 @@
 """
 Main Flask application for Vectra VTU Backend
-Initializes Flask app, registers blueprints, and sets up middleware
+Updated for Render.com deployment
 """
 from flask import Flask, jsonify, request
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 import sys
 from datetime import datetime
@@ -32,7 +31,7 @@ def create_app():
         app.logger.error(f"✗ Configuration error: {e}")
         raise
     
-    # CORS - Simple implementation without flask-cors
+    # CORS headers
     @app.after_request
     def after_request(response):
         response.headers.add('Access-Control-Allow-Origin', '*')
@@ -57,33 +56,14 @@ def create_app():
     
     # Configure logging
     if not app.debug:
-        # Create logs directory if it doesn't exist
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+        app.logger.setLevel(logging.INFO)
         
-        # File handler with rotation
-        file_handler = RotatingFileHandler(
-            os.path.join(log_dir, 'vectra.log'),
-            maxBytes=10485760,  # 10MB
-            backupCount=10
-        )
-        file_handler.setFormatter(logging.Formatter(
-            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-        ))
-        file_handler.setLevel(logging.INFO)
-        app.logger.addHandler(file_handler)
-        
-        # Console handler
+        # Console handler (Render logs to stdout)
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
         app.logger.addHandler(console_handler)
         
-        app.logger.setLevel(logging.INFO)
-        app.logger.info('Vectra VTU Backend startup')
-    else:
-        # Simple console logging for debug mode
-        app.logger.setLevel(logging.DEBUG)
+        app.logger.info('Vectra VTU Backend startup on Render')
     
     # Request logging middleware
     @app.before_request
@@ -116,7 +96,8 @@ def create_app():
             'service': 'Vectra VTU Backend',
             'timestamp': datetime.now().isoformat(),
             'python_version': sys.version,
-            'flask_version': '3.0.0'
+            'environment': 'Render' if os.environ.get('RENDER') else 'Local',
+            'database': 'PostgreSQL' if os.environ.get('DATABASE_URL') else 'SQLite'
         }), 200
     
     # Root endpoint
@@ -127,24 +108,24 @@ def create_app():
             'service': 'Vectra VTU Backend',
             'version': '1.0.0',
             'status': 'running',
+            'environment': 'Render.com',
             'endpoints': {
                 'airtime': '/api/v1/airtime',
                 'data': '/api/v1/data',
                 'webhooks': '/webhooks/iacafe',
                 'health': '/health'
             },
-            'documentation': 'https://vectraconnect.pythonanywhere.com/health'
+            'documentation': 'https://vectra-vtu.onrender.com/health'
         }), 200
     
     app.logger.info("✓ Flask application created successfully")
     return app
 
-# Create application instance
+# Create application instance for Gunicorn
 app = create_app()
 
 if __name__ == '__main__':
     # Run in development mode
-    # In production, this will be served by PythonAnywhere's WSGI server
     print("Starting Vectra VTU Backend in development mode...")
     app.run(
         host='0.0.0.0',
