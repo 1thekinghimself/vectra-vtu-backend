@@ -9,6 +9,7 @@ from datetime import datetime
 
 from models import Transaction, TransactionStatus, ServiceType, NetworkType
 from services.iacafe import iacafe_service
+from services.transaction_service import change_transaction_status
 from database import get_db
 from sqlalchemy.orm import Session
 
@@ -146,13 +147,13 @@ def purchase_data():
     request_id = f"VECTRA_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:12]}"
     
     db: Session = next(get_db())
-    
+
+    # DB-first: insert INITIATED transaction
     try:
-        # Check for duplicate request (idempotency)
         existing_transaction = db.query(Transaction).filter(
             Transaction.request_id == request_id
         ).first()
-        
+
         if existing_transaction:
             return jsonify({
                 'success': False,
@@ -162,8 +163,7 @@ def purchase_data():
                     'transaction': existing_transaction.to_dict()
                 }
             }), 409
-        
-        # Create transaction record with PENDING status
+
         transaction = Transaction(
             request_id=request_id,
             user_id=user_id,
@@ -172,94 +172,96 @@ def purchase_data():
             phone=phone,
             amount=amount,
             amount_charged=amount_charged,
-            status=TransactionStatus.PENDING
+            status=TransactionStatus.INITIATED
         )
-        
+
         db.add(transaction)
         db.commit()
-        
-        logger.info(f"Created pending data transaction: {request_id} for {phone}")
-        
-        # Call IA Café API
-        try:
-            api_response = iacafe_service.purchase_data(
-                request_id=request_id,
-                phone=phone,
-                network=network,
-                data_plan_id=data_plan_id
-            )
-            
-            # Update transaction with IA Café response
-            if api_response.get('success'):
-                transaction.iacafe_reference = api_response.get('reference', '')
-                transaction.iacafe_status = api_response.get('status', '')
-                
-                # Map IA Café status to internal status
-                normalized_status = iacafe_service.normalize_status(
-                    api_response.get('status', '')
-                )
-                
-                # IMPORTANT: Only update to PENDING, not SUCCESS
-                # Webhook will update to SUCCESS later
-                if normalized_status == 'SUCCESS':
-                    transaction.status = TransactionStatus.PROCESSING
-                else:
-                    transaction.status = TransactionStatus(normalized_status)
-                
-                db.commit()
-                
-                logger.info(f"IA Café API response for {request_id}: {api_response}")
-                
-                return jsonify({
-                    'success': True,
-                    'message': 'Data purchase initiated successfully',
-                    'data': {
-                        'request_id': request_id,
-                        'transaction': transaction.to_dict(),
-                        'api_response': api_response
-                    }
-                }), 200
-            else:
-                # API returned failure
-                transaction.status = TransactionStatus.FAILED
-                transaction.error_message = api_response.get('message', 'API call failed')
-                db.commit()
-                
-                return jsonify({
-                    'success': False,
-                    'message': f"Data purchase failed: {api_response.get('message', 'Unknown error')}",
-                    'data': {
-                        'request_id': request_id,
-                        'transaction': transaction.to_dict()
-                    }
-                }), 400
-                
-        except Exception as api_error:
-            # IA Café API call failed
-            transaction.status = TransactionStatus.FAILED
-            transaction.error_message = str(api_error)
-            db.commit()
-            
-            logger.error(f"IA Café API error for {request_id}: {str(api_error)}")
-            
-            # ⚠️ CRITICAL: In production, implement refund logic here
-            logger.critical(f"REFUND REQUIRED: Data transaction {request_id} failed. Amount: {amount_charged}")
-            
-            return jsonify({
-                'success': False,
-                'message': 'Data purchase failed. Please try again.',
-                'data': {
-                    'request_id': request_id,
-                    'transaction': transaction.to_dict()
-                }
-            }), 500
-            
+
+        logger.info(f"Created transaction INITIATED: {request_id} for {phone}")
+
     except Exception as e:
         db.rollback()
-        logger.error(f"Transaction creation failed: {str(e)}")
+        logger.error(f"Transaction creation failed (abort, no provider call): {str(e)}")
         return jsonify({
             'success': False,
-            'message': 'Internal server error'
+            'message': 'Failed to create transaction'
+        }), 500
+
+    # Transition to PROCESSING
+    try:
+        transaction = change_transaction_status(db, transaction, TransactionStatus.PROCESSING)
+    except Exception as e:
+        logger.error(f"Failed to set transaction to PROCESSING: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Failed to process transaction'
+        }), 500
+
+    # Call IA Café API
+    try:
+        api_response = iacafe_service.purchase_data(
+            request_id=request_id,
+            phone=phone,
+            network=network,
+            data_plan_id=data_plan_id
+        )
+
+        transaction.provider_response = api_response
+        transaction.iacafe_reference = api_response.get('reference', '')
+        transaction.iacafe_status = api_response.get('status', '')
+        db.add(transaction)
+        db.commit()
+
+        logger.info(f"IA Café API response for {request_id}: {api_response}")
+
+        if not api_response.get('success'):
+            try:
+                transaction = change_transaction_status(db, transaction, TransactionStatus.FAILED)
+            except Exception:
+                logger.exception("Failed to mark transaction FAILED after provider failure")
+
+            return jsonify({
+                'success': False,
+                'message': f"Data purchase failed: {api_response.get('message', 'Unknown error')}",
+                'data': {
+                    'request_id': request_id,
+                    'transaction': transaction.to_dict(),
+                    'api_response': api_response
+                }
+            }), 400
+
+        return jsonify({
+            'success': True,
+            'message': 'Data purchase initiated successfully',
+            'data': {
+                'request_id': request_id,
+                'transaction': transaction.to_dict(),
+                'api_response': api_response
+            }
+        }), 200
+
+    except Exception as api_error:
+        transaction.provider_response = {'error': str(api_error)}
+        transaction.error_message = str(api_error)
+        db.add(transaction)
+        db.commit()
+
+        try:
+            transaction = change_transaction_status(db, transaction, TransactionStatus.FAILED)
+        except Exception:
+            logger.exception("Failed to mark transaction FAILED after provider exception")
+
+        logger.error(f"IA Café API error for {request_id}: {str(api_error)}")
+        logger.critical(f"REFUND REQUIRED: Data transaction {request_id} failed. Amount: {amount_charged}")
+
+        return jsonify({
+            'success': False,
+            'message': 'Data purchase failed. Please try again.',
+            'data': {
+                'request_id': request_id,
+                'transaction': transaction.to_dict()
+            }
         }), 500
 
 @data_bp.route('/status/<request_id>', methods=['GET'])
