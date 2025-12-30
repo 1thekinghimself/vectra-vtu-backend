@@ -1,74 +1,105 @@
 """
-Database models for Vectra VTU Backend
-Defines the Transaction model with all required fields
-Updated for Python 3.13 compatibility
+Database models for Vectra VTU Backend.
+
+This file defines the `Transaction` model and required enums.
 """
-from sqlalchemy import Column, Integer, String, Float, DateTime, Enum as SQLEnum, Index
-from sqlalchemy.sql import func
+from datetime import datetime
 import enum
+import uuid
+
+from sqlalchemy import (
+    Column,
+    String,
+    Float,
+    DateTime,
+    Enum as SQLEnum,
+    JSON,
+    Index,
+    UniqueConstraint,
+)
+from sqlalchemy.sql import func
+from sqlalchemy.orm import validates
+
 from database import Base
 
+
 class ServiceType(str, enum.Enum):
-    """Enum for service types"""
-    AIRTIME = 'airtime'
-    DATA = 'data'
+    airtime = 'airtime'
+    data = 'data'
+
 
 class TransactionStatus(str, enum.Enum):
-    """Enum for transaction statuses"""
-    PENDING = 'PENDING'
+    INITIATED = 'INITIATED'
+    PROCESSING = 'PROCESSING'
     SUCCESS = 'SUCCESS'
     FAILED = 'FAILED'
     REFUNDED = 'REFUNDED'
-    PROCESSING = 'PROCESSING'
 
-class NetworkType(str, enum.Enum):
-    """Enum for network types"""
-    MTN = 'mtn'
-    GLO = 'glo'
-    AIRTEL = 'airtel'
-    ETISALAT = '9mobile'
 
 class Transaction(Base):
-    """Transaction model for storing all VTU transactions"""
+    """Transaction model for storing VTU transactions.
+
+    Fields (mandatory):
+    - id: UUID string (primary key)
+    - request_id: unique request identifier (DB-level unique + index)
+    - user_id: nullable, for guest/anonymous
+    - service_type: ENUM('airtime','data')
+    - network: provider network name
+    - phone: destination phone number
+    - amount: numeric amount requested
+    - status: ENUM (validated at model level)
+    - provider_reference: nullable provider reference string
+    - provider_response: nullable JSON payload from provider
+    - created_at, updated_at: timestamps
+    """
+
     __tablename__ = 'transactions'
-    
-    id = Column(Integer, primary_key=True, index=True)
-    request_id = Column(String(100), unique=True, index=True, nullable=False)
-    user_id = Column(String(50), nullable=True, index=True)  # Can be null for anonymous transactions
-    service = Column(SQLEnum(ServiceType), nullable=False)
-    network = Column(SQLEnum(NetworkType), nullable=False)
-    phone = Column(String(20), nullable=False)
-    amount = Column(Float, nullable=False)  # Amount requested by user
-    amount_charged = Column(Float, nullable=False)  # Actual amount charged (may include fees)
-    status = Column(SQLEnum(TransactionStatus), default=TransactionStatus.PENDING, nullable=False)
-    iacafe_reference = Column(String(100), nullable=True)  # IA Café's transaction reference
-    iacafe_status = Column(String(50), nullable=True)  # Original IA Café status
-    error_message = Column(String(500), nullable=True)  # Store error details if any
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
-    # Create composite index for faster queries
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    request_id = Column(String(100), nullable=False, index=True)
+    user_id = Column(String(36), nullable=True, index=True)
+    service_type = Column(SQLEnum(ServiceType, validate_strings=True), nullable=False)
+    network = Column(String(50), nullable=False)
+    phone = Column(String(32), nullable=False)
+    amount = Column(Float, nullable=False)
+    status = Column(SQLEnum(TransactionStatus, validate_strings=True), nullable=False)
+    provider_reference = Column(String(200), nullable=True)
+    provider_response = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
     __table_args__ = (
-        Index('idx_user_service_status', 'user_id', 'service', 'status'),
-        Index('idx_phone_created', 'phone', 'created_at'),
+        UniqueConstraint('request_id', name='uq_transactions_request_id'),
+        Index('ix_transactions_user_service_status', 'user_id', 'service_type', 'status'),
     )
-    
+
+    @validates('status')
+    def validate_status(self, key, value):
+        """Ensure status is a valid TransactionStatus value."""
+        if value is None:
+            raise ValueError('status cannot be None')
+        if isinstance(value, TransactionStatus):
+            return value
+        try:
+            return TransactionStatus(value)
+        except ValueError:
+            raise ValueError(f'Invalid status: {value}. Must be one of {[s.value for s in TransactionStatus]}')
+
     def to_dict(self):
-        """Convert transaction to dictionary for API responses"""
         return {
             'id': self.id,
             'request_id': self.request_id,
             'user_id': self.user_id,
-            'service': self.service.value if self.service else None,
-            'network': self.network.value if self.network else None,
+            'service_type': self.service_type.value if self.service_type else None,
+            'network': self.network,
             'phone': self.phone,
             'amount': self.amount,
-            'amount_charged': self.amount_charged,
             'status': self.status.value if self.status else None,
-            'iacafe_reference': self.iacafe_reference,
+            'provider_reference': self.provider_reference,
+            'provider_response': self.provider_response,
             'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
-    
+
     def __repr__(self):
-        return f"<Transaction {self.request_id}: {self.service.value if self.service else 'N/A'} - {self.status.value if self.status else 'N/A'}>"
+        return f"<Transaction {self.request_id} {self.service_type.value} {self.status.value}>"
