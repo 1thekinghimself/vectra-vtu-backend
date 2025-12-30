@@ -143,12 +143,19 @@ class IACafeService:
             print(f"   Status Code: {response.status_code}")
             print(f"   Response Headers: {dict(response.headers)}")
             
-            response.raise_for_status()
-            
+            try:
+                response.raise_for_status()
+            except requests.exceptions.HTTPError:
+                # Provide the response body for diagnostics (without leaking secrets)
+                status = response.status_code
+                text = response.text
+                logger.error(f"IA Café HTTP error {status}: {text}")
+                raise Exception(f"IA Café API request failed: {status} {text}")
+
             result = response.json()
             print(f"✅ API Response: {json.dumps(result, indent=2)}")
             logger.info(f"API Response: {result}")
-            
+
             return result
             
         except requests.exceptions.ConnectTimeout as e:
