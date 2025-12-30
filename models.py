@@ -26,16 +26,24 @@ from sqlalchemy.orm.attributes import NO_VALUE
 
 
 class ServiceType(str, enum.Enum):
-    airtime = 'airtime'
-    data = 'data'
+    AIRTIME = 'airtime'
+    DATA = 'data'
 
 
 class TransactionStatus(str, enum.Enum):
     INITIATED = 'INITIATED'
+    PENDING = 'INITIATED'
     PROCESSING = 'PROCESSING'
     SUCCESS = 'SUCCESS'
     FAILED = 'FAILED'
     REFUNDED = 'REFUNDED'
+
+
+class NetworkType(str, enum.Enum):
+    MTN = 'mtn'
+    GLO = 'glo'
+    AIRTEL = 'airtel'
+    ETISALAT = '9mobile'
 
 
 class Transaction(Base):
@@ -60,11 +68,15 @@ class Transaction(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     request_id = Column(String(100), nullable=False, index=True)
     user_id = Column(String(36), nullable=True, index=True)
-    service_type = Column(SQLEnum(ServiceType, validate_strings=True), nullable=False)
-    network = Column(String(50), nullable=False)
+    service = Column(SQLEnum(ServiceType, validate_strings=True), nullable=False)
+    network = Column(SQLEnum(NetworkType, validate_strings=True), nullable=False)
     phone = Column(String(32), nullable=False)
     amount = Column(Float, nullable=False)
+    amount_charged = Column(Float, nullable=False)
     status = Column(SQLEnum(TransactionStatus, validate_strings=True), nullable=False)
+    iacafe_reference = Column(String(100), nullable=True)
+    iacafe_status = Column(String(50), nullable=True)
+    error_message = Column(String(500), nullable=True)
     provider_reference = Column(String(200), nullable=True)
     provider_response = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -72,7 +84,7 @@ class Transaction(Base):
 
     __table_args__ = (
         UniqueConstraint('request_id', name='uq_transactions_request_id'),
-        Index('ix_transactions_user_service_status', 'user_id', 'service_type', 'status'),
+        Index('ix_transactions_user_service_status', 'user_id', 'service', 'status'),
     )
 
     @validates('status')
@@ -92,11 +104,15 @@ class Transaction(Base):
             'id': self.id,
             'request_id': self.request_id,
             'user_id': self.user_id,
-            'service_type': self.service_type.value if self.service_type else None,
+            'service': self.service.value if self.service else None,
             'network': self.network,
             'phone': self.phone,
             'amount': self.amount,
             'status': self.status.value if self.status else None,
+            'amount_charged': self.amount_charged,
+            'iacafe_reference': self.iacafe_reference,
+            'iacafe_status': self.iacafe_status,
+            'error_message': self.error_message,
             'provider_reference': self.provider_reference,
             'provider_response': self.provider_response,
             'created_at': self.created_at.isoformat() if self.created_at else None,
