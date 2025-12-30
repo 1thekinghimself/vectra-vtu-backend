@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 
 from models import Transaction, TransactionStatus
+from services.transaction_service import change_transaction_status
 from database import get_db
 from sqlalchemy.orm import Session
 from services.iacafe import iacafe_service
@@ -96,16 +97,18 @@ def handle_iacafe_webhook():
     # Get raw body for signature verification
     raw_body = request.get_data()
     
-    # Get webhook secret from config
+    # Get webhook secret from config. If present, verify signature; otherwise skip signature validation.
     secret = current_app.config.get('IACAFE_WEBHOOK_SECRET')
-    if not secret:
-        logger.error("Webhook secret not configured")
-        return jsonify({'error': 'Server configuration error'}), 500
-    
-    # Verify webhook signature
-    if not verify_webhook_signature(timestamp, signature, raw_body, secret):
-        logger.warning(f"Invalid webhook signature: delivery={delivery_id}")
-        return jsonify({'error': 'Invalid signature'}), 401
+    if secret:
+        if not all([signature, timestamp]):
+            logger.warning("Missing signature/timestamp headers for signed webhook")
+            return jsonify({'error': 'Missing signature headers'}), 400
+
+        if not verify_webhook_signature(timestamp, signature, raw_body, secret):
+            logger.warning(f"Invalid webhook signature: delivery={delivery_id}")
+            return jsonify({'error': 'Invalid signature'}), 401
+    else:
+        logger.warning("Webhook secret not configured; skipping signature verification")
     
     # Parse webhook payload
     try:
@@ -136,15 +139,25 @@ def handle_iacafe_webhook():
             return jsonify({'error': 'Missing request_id'}), 400
         
         db: Session = next(get_db())
-        
+
         # Find transaction by request_id
         transaction = db.query(Transaction).filter(
             Transaction.request_id == request_id
         ).first()
-        
+
         if not transaction:
-            logger.warning(f"Transaction not found for request_id: {request_id}")
-            return jsonify({'error': 'Transaction not found'}), 404
+            logger.warning(f"Transaction not found for request_id: {request_id} — ignoring webhook")
+            return jsonify({'success': True, 'message': 'Transaction not found; ignored'}), 200
+
+        # Idempotency: if we've already processed this delivery, ignore
+        if delivery_id and transaction.webhook_delivery_id == delivery_id:
+            logger.info(f"Duplicate webhook delivery {delivery_id} for {request_id}; ignoring")
+            return jsonify({'success': True, 'message': 'Duplicate delivery ignored'}), 200
+
+        # If transaction already in terminal state, ignore
+        if transaction.status in (TransactionStatus.SUCCESS, TransactionStatus.FAILED):
+            logger.info(f"Transaction {request_id} already terminal ({transaction.status}); ignoring webhook")
+            return jsonify({'success': True, 'message': 'Already terminal; ignored'}), 200
         
         # Update transaction based on webhook data
         iacafe_status = data.get('status')
@@ -152,43 +165,46 @@ def handle_iacafe_webhook():
         
         if iacafe_status:
             transaction.iacafe_status = iacafe_status
-            
+
             # Normalize IA Café status to internal status
             normalized_status = iacafe_service.normalize_status(iacafe_status)
-            
-            # 🚨 CRITICAL FINANCIAL RULE:
-            # ONLY webhook can mark transaction as SUCCESS/REFUNDED/FAILED
-            # This prevents double-spending and ensures reconciliation
-            
-            if normalized_status == 'SUCCESS':
-                transaction.status = TransactionStatus.SUCCESS
-                logger.info(f"Transaction {request_id} marked as SUCCESS via webhook")
-                
-            elif normalized_status == 'REFUNDED':
-                transaction.status = TransactionStatus.REFUNDED
-                logger.info(f"Transaction {request_id} marked as REFUNDED via webhook")
-                
-                # ⚠️ REFUND LOGIC PLACEHOLDER
-                # In production, trigger refund to user's wallet/account
-                logger.critical(f"REFUND PROCESS REQUIRED: Transaction {request_id} was refunded by IA Café")
-                
-            elif normalized_status == 'FAILED':
-                transaction.status = TransactionStatus.FAILED
-                logger.info(f"Transaction {request_id} marked as FAILED via webhook")
-                
-                # ⚠️ REFUND LOGIC PLACEHOLDER
-                logger.critical(f"REFUND PROCESS REQUIRED: Transaction {request_id} failed. Amount: {transaction.amount_charged}")
+
+            # Use safe status transitions via the service
+            try:
+                if normalized_status == 'SUCCESS':
+                    change_transaction_status(db, transaction, TransactionStatus.SUCCESS)
+                    logger.info(f"Transaction {request_id} marked as SUCCESS via webhook")
+
+                elif normalized_status == 'REFUNDED':
+                    change_transaction_status(db, transaction, TransactionStatus.REFUNDED)
+                    logger.info(f"Transaction {request_id} marked as REFUNDED via webhook")
+                    logger.critical(f"REFUND PROCESS REQUIRED: Transaction {request_id} was refunded by IA Café")
+
+                elif normalized_status == 'FAILED':
+                    change_transaction_status(db, transaction, TransactionStatus.FAILED)
+                    logger.info(f"Transaction {request_id} marked as FAILED via webhook")
+                    logger.critical(f"REFUND PROCESS REQUIRED: Transaction {request_id} failed. Amount: {transaction.amount_charged}")
+            except Exception as e:
+                logger.error(f"Invalid webhook status transition for {request_id}: {str(e)}")
+                # Do not raise; webhook should be idempotent and resilient
         
+        # Store webhook payload and metadata
+        transaction.webhook_payload = payload
+        transaction.webhook_received_at = datetime.utcnow()
+        if delivery_id:
+            transaction.webhook_delivery_id = delivery_id
+
         if reference:
             transaction.iacafe_reference = reference
-        
+
         # Update any additional data
         transaction.error_message = data.get('error_message', transaction.error_message)
-        
+
+        db.add(transaction)
         db.commit()
-        
-        logger.info(f"Webhook processed successfully: request_id={request_id}, status={normalized_status}")
-        
+
+        logger.info(f"Webhook processed successfully: request_id={request_id}, status={normalized_status if 'normalized_status' in locals() else 'N/A'}")
+
         return jsonify({
             'success': True,
             'message': 'Webhook processed',

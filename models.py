@@ -79,6 +79,9 @@ class Transaction(Base):
     error_message = Column(String(500), nullable=True)
     provider_reference = Column(String(200), nullable=True)
     provider_response = Column(JSON, nullable=True)
+    webhook_payload = Column(JSON, nullable=True)
+    webhook_received_at = Column(DateTime(timezone=True), nullable=True)
+    webhook_delivery_id = Column(String(200), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -115,6 +118,9 @@ class Transaction(Base):
             'error_message': self.error_message,
             'provider_reference': self.provider_reference,
             'provider_response': self.provider_response,
+            'webhook_delivery_id': self.webhook_delivery_id,
+            'webhook_payload': self.webhook_payload,
+            'webhook_received_at': self.webhook_received_at.isoformat() if self.webhook_received_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
