@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: vectra-vtu
+    env: python
+    plan: free  # or starter for $7/month
+    region: oregon  # or closest to Nigeria
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: IACAFE_API_KEY
+        sync: false
+      - key: IACAFE_WEBHOOK_SECRET
+        sync: false
+      - key: FLASK_DEBUG
+        value: "False"
+    autoDeploy: true
