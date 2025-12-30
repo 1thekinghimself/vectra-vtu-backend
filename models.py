@@ -21,6 +21,8 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import validates
 
 from database import Base
+from sqlalchemy import event
+from sqlalchemy.orm.attributes import NO_VALUE
 
 
 class ServiceType(str, enum.Enum):
@@ -103,3 +105,53 @@ class Transaction(Base):
 
     def __repr__(self):
         return f"<Transaction {self.request_id} {self.service_type.value} {self.status.value}>"
+
+
+# Allowed lifecycle transitions
+_ALLOWED_STATUS_TRANSITIONS = {
+    TransactionStatus.INITIATED.value: {TransactionStatus.PROCESSING.value},
+    TransactionStatus.PROCESSING.value: {TransactionStatus.SUCCESS.value, TransactionStatus.FAILED.value},
+    TransactionStatus.SUCCESS.value: {TransactionStatus.REFUNDED.value},
+    TransactionStatus.FAILED.value: set(),
+    TransactionStatus.REFUNDED.value: set(),
+}
+
+
+@event.listens_for(Transaction.status, 'set', retval=True)
+def _validate_status_transition(target, value, oldvalue, initiator):
+    """Reject invalid status transitions globally.
+
+    This listener ensures that any change to `status` follows the
+    state machine defined in `_ALLOWED_STATUS_TRANSITIONS`.
+
+    - Initial assignment (oldvalue == NO_VALUE) is allowed only when
+      setting `INITIATED`.
+    - Re-assigning the same value is a no-op.
+    - Any invalid transition raises ValueError.
+    """
+    # Normalize incoming values to strings
+    new = value.value if isinstance(value, TransactionStatus) else value
+
+    # Validate new is a known status
+    if new not in {s.value for s in TransactionStatus}:
+        raise ValueError(f"Invalid status value: {new}")
+
+    # Allow initial set only to INITIATED
+    if oldvalue is NO_VALUE:
+        if new != TransactionStatus.INITIATED.value:
+            raise ValueError("Initial status must be 'INITIATED'")
+        return value
+
+    # No-op if unchanged
+    old = oldvalue.value if isinstance(oldvalue, TransactionStatus) else oldvalue
+    if old == new:
+        return value
+
+    allowed = _ALLOWED_STATUS_TRANSITIONS.get(old)
+    if allowed is None:
+        raise ValueError(f"Unknown current status: {old}")
+
+    if new not in allowed:
+        raise ValueError(f"Invalid status transition: {old} -> {new}")
+
+    return value
