@@ -14,7 +14,6 @@ from routes.airtime import airtime_bp
 from routes.data import data_bp
 from routes.webhooks import webhooks_bp
 from routes.transactions import transactions_bp
-from routes.transactions import transactions_bp
 
 def create_app():
     """Create and configure the Flask application"""
@@ -54,7 +53,6 @@ def create_app():
     app.register_blueprint(airtime_bp)
     app.register_blueprint(data_bp)
     app.register_blueprint(webhooks_bp)
-    app.register_blueprint(transactions_bp)
     app.register_blueprint(transactions_bp)
     app.logger.info("✓ Blueprints registered")
     
