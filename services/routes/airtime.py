@@ -43,6 +43,7 @@ def purchase_airtime():
     }
     """
     data = request.get_json()
+    logger.info(f"purchase_airtime request: phone={data.get('phone')}, network={data.get('network')}, amount={data.get('amount')}")
     
     # Validate required fields
     required_fields = ['phone', 'network', 'amount', 'amount_charged']
