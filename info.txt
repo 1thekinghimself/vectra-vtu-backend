@@ -1,4 +1,4 @@
-Summary of changes and features implemented (concise)
+Summary of changes and features implemented
 
 Models & DB schema
 - Added `Transaction` model in `models.py` with UUID `id`, `request_id` (DB UNIQUE + index), `user_id`, `service` (ENUM), `network` (ENUM), `phone`, `amount`, `amount_charged`, `status` (ENUM), `provider_reference`, `provider_response` (JSON), `iacafe_reference`, `iacafe_status`, `error_message`, `webhook_payload`, `webhook_received_at`, `webhook_delivery_id`, `created_at`, `updated_at`.
@@ -81,10 +81,3 @@ Notes & next steps (recommended)
 
 Files added/modified (high level)
 - Modified: `models.py`, `database.py` (init usage), `services/iacafe.py`, `services/transaction_service.py`, `services/routes/airtime.py`, `services/routes/data.py`, `services/routes/webhooks.py`, `services/routes/transactions.py`, `app.py`, `routes/transactions.py`, `README.md`
-
-If you want, I can now:
-- Add unit tests for the flows listed above.
-- Create Alembic migrations.
-- Expose refund timeout via config/env and update README.
-
--- End of summary
