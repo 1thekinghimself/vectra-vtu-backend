@@ -1,0 +1,90 @@
+Summary of changes and features implemented (concise)
+
+Models & DB schema
+- Added `Transaction` model in `models.py` with UUID `id`, `request_id` (DB UNIQUE + index), `user_id`, `service` (ENUM), `network` (ENUM), `phone`, `amount`, `amount_charged`, `status` (ENUM), `provider_reference`, `provider_response` (JSON), `iacafe_reference`, `iacafe_status`, `error_message`, `webhook_payload`, `webhook_received_at`, `webhook_delivery_id`, `created_at`, `updated_at`.
+- Enforced DB-level UNIQUE on `request_id` via `UniqueConstraint`.
+- Added `ServiceType`, `TransactionStatus` (including `INITIATED`, `PROCESSING`, `SUCCESS`, `FAILED`, `REFUNDED`, with `PENDING` alias), and `NetworkType` enums.
+- `to_dict()` exposes these fields for API responses.
+
+Status lifecycle & validation
+- Implemented model-level status validation via `@validates('status')` and an event listener `@event.listens_for(Transaction.status, 'set')` that enforces allowed transitions:
+  - INITIATED → PROCESSING
+  - PROCESSING → SUCCESS or FAILED
+  - SUCCESS → REFUNDED
+  - Rejects invalid transitions and disallows initial non-INITIATED assignment.
+- All status updates routed through a single service function `change_transaction_status(db, transaction, new_status)` in `services/transaction_service.py` which commits and refreshes the instance.
+
+Purchase flow (DB-first)
+- Modified purchase endpoints (`services/routes/airtime.py`, `services/routes/data.py`) to follow DB-first flow:
+  1. Generate `request_id`.
+  2. Insert transaction with `status=INITIATED`. If insert fails, abort and DO NOT call provider.
+  3. Immediately transition to `PROCESSING` via `change_transaction_status`.
+  4. Call IA Café using same `request_id`.
+  5. Store full provider response to `provider_response` and related fields.
+  6. NEVER mark `SUCCESS` here — provider/webhook must confirm.
+- Duplicate `request_id` creation requests are rejected (409) at DB insertion.
+- Added incoming purchase request logging for auditability.
+
+Webhook handling (source of truth)
+- Updated `services/routes/webhooks.py`:
+  - Identify transactions strictly by `request_id`.
+  - If transaction not found → log and ignore (200/ignored behavior).
+  - Optional HMAC signature verification: enforced if `IACAFE_WEBHOOK_SECRET` configured; if absent, signature check is skipped with a warning.
+  - Idempotent handling: duplicate delivery (`X-VTU-Delivery`) is detected and ignored.
+  - If transaction already terminal (`SUCCESS` or `FAILED`) → ignore duplicate webhooks.
+  - Use `change_transaction_status()` for safe lifecycle transitions (SUCCESS/REFUNDED/FAILED).
+  - Store raw webhook payload, delivery id, and received timestamp on transaction.
+
+Requery & Refund endpoints
+- Added transactions API (`services/routes/transactions.py` + `routes/transactions.py` shim) and registered blueprint in `app.py`.
+- Requery: `GET /transactions/requery/<request_id>`
+  - Fetch transaction; if not found → 404 (no provider call).
+  - If status is terminal (SUCCESS/FAILED/REFUNDED) → return immediately.
+  - Otherwise call IA Café requery (`iacafe_service.requery_order`), store provider response, and attempt safe status transition.
+- Refund: `POST /transactions/refund/<request_id>` (and alternate route variants)
+  - Refund allowed only when:
+    - status == FAILED; OR
+    - status == PROCESSING and stuck beyond configured timeout (default 10 minutes).
+  - Refund flow: transition to REFUNDED via `change_transaction_status`, log reason and timestamp, store refund reference in `provider_response`.
+  - Refund action is idempotent and logged.
+
+Provider service wrapper
+- `services/iacafe.py` wrapper (`iacafe_service`) used for: purchase_airtime, purchase_data, requery_order/get_order_status, with robust HTTP handling and logging. Responses are normalized via `normalize_status`.
+
+Logging & audit trail
+- Added structured logging across flows:
+  - Incoming purchase requests (request_id, phone, network, amount).
+  - Transaction DB creation (request_id, timestamps).
+  - Provider requests & responses (full provider_response stored on transaction and logged).
+  - Webhook payloads (stored + logged), including delivery id and timestamp.
+  - Requery calls and results.
+  - Refund actions with reason and refund reference.
+- App-level request logging middleware logs API requests.
+
+Safety rules enforced (explicit)
+- Never call IA Café before saving transaction to DB (DB-first).
+- Never update status without checking current state; all updates go through `change_transaction_status` which enforces transitions.
+- Never trust client-side status; only server/provider/webhook may alter terminal statuses.
+- Never allow duplicate `request_id` (DB unique + check before insert).
+- Transactions are not deleted by code; history is preserved.
+
+Compatibility & misc
+- Restored/kept backward-compatible field names used by routes (e.g., `service`, `amount_charged`, `iacafe_*` fields).
+- Updated `README.md` with last-updated date.
+- Committed and pushed all changes to `origin/main` in multiple commits.
+
+Notes & next steps (recommended)
+- Add unit tests covering lifecycle transitions, DB-first purchase flow, webhook idempotency, requery, and refund flows.
+- Add Alembic migrations to formalize schema changes.
+- Consider an immutable audit table or append-only event log for stronger dispute evidence.
+- Integrate actual refund/payment gateway logic (currently placeholder stores a refund reference).
+
+Files added/modified (high level)
+- Modified: `models.py`, `database.py` (init usage), `services/iacafe.py`, `services/transaction_service.py`, `services/routes/airtime.py`, `services/routes/data.py`, `services/routes/webhooks.py`, `services/routes/transactions.py`, `app.py`, `routes/transactions.py`, `README.md`
+
+If you want, I can now:
+- Add unit tests for the flows listed above.
+- Create Alembic migrations.
+- Expose refund timeout via config/env and update README.
+
+-- End of summary
